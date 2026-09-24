@@ -51,6 +51,8 @@ spec:
     - name: maitri-aggregation-cronjob
       expression: "request.namespace == 'simulator-maitri' && object.metadata.name == 'observation-aggregate'"
   validations:
+    - expression: "request.userInfo.username == 'system:serviceaccount:flux-system:maitri-flux-reconciler'"
+      message: "only the dedicated Maitri Flux reconciler may change this CronJob"
     - expression: "oldObject == null || object.spec == oldObject.spec || (object.spec.schedule != oldObject.spec.schedule && object.spec.schedule in ['0 */12 * * *', '0 */6 * * *'] && object.spec.jobTemplate == oldObject.spec.jobTemplate && (!has(object.spec.suspend) && !has(oldObject.spec.suspend) || has(object.spec.suspend) && has(oldObject.spec.suspend) && object.spec.suspend == oldObject.spec.suspend) && object.spec.timeZone == oldObject.spec.timeZone && object.spec.concurrencyPolicy == oldObject.spec.concurrencyPolicy && object.spec.startingDeadlineSeconds == oldObject.spec.startingDeadlineSeconds && object.spec.successfulJobsHistoryLimit == oldObject.spec.successfulJobsHistoryLimit && object.spec.failedJobsHistoryLimit == oldObject.spec.failedJobsHistoryLimit)"
       message: "only the aggregation schedule may change"
     - expression: "object.spec.schedule == '0 */12 * * *' || object.spec.schedule == '0 */6 * * *'"

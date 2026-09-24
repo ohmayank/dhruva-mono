@@ -288,3 +288,14 @@ func TestMaitriKustomizeRendersCompleteCronJob(t *testing.T) {
 		}
 	}
 }
+
+func TestMaitriPolicyRequiresTheDedicatedFluxIdentity(t *testing.T) {
+	policy, err := os.ReadFile("../flux/maitri/bootstrap.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const identity = "system:serviceaccount:flux-system:maitri-flux-reconciler"
+	if !strings.Contains(string(policy), identity) {
+		t.Fatalf("station policy does not require dedicated Flux identity %q", identity)
+	}
+}
