@@ -57,10 +57,19 @@ type changeRequest struct {
 
 type requestRecord struct {
 	changeRequest
-	Status     string `json:"status"`
-	Reason     string `json:"reason,omitempty"`
-	ApprovedBy string `json:"approved_by,omitempty"`
-	Revision   string `json:"revision,omitempty"`
+	Status     string       `json:"status"`
+	Reason     string       `json:"reason,omitempty"`
+	ApprovedBy string       `json:"approved_by,omitempty"`
+	Revision   string       `json:"revision,omitempty"`
+	Audit      []auditEvent `json:"audit"`
+}
+
+type auditEvent struct {
+	At       time.Time `json:"at"`
+	Status   string    `json:"status"`
+	Actor    string    `json:"actor"`
+	Reason   string    `json:"reason,omitempty"`
+	Revision string    `json:"revision,omitempty"`
 }
 
 type gatewayState struct {
@@ -132,6 +141,7 @@ func (s *server) createChangeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record := requestRecord{changeRequest: request, Status: "pending-approval"}
+	record.addAudit("pending-approval", request.RequestedBy, "request accepted", "")
 	s.state.Requests[request.RequestID] = record
 	if err := s.saveState(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -188,13 +198,16 @@ func (s *server) decideChangeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, action := requestPath(r.URL.Path)
-	if id == "" || (action != "approve" && action != "reject") {
+	if id == "" || (action != "approve" && action != "reject" && action != "outcome") {
 		http.NotFound(w, r)
 		return
 	}
 	var decision struct {
 		ApprovedBy string `json:"approved_by"`
 		Reason     string `json:"reason"`
+		Status     string `json:"status"`
+		Revision   string `json:"revision"`
+		Reporter   string `json:"reporter"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&decision); err != nil {
 		http.Error(w, "invalid decision", http.StatusBadRequest)
@@ -208,6 +221,27 @@ func (s *server) decideChangeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if record.Status != "pending-approval" {
+		if action != "outcome" {
+			writeRequestJSON(w, http.StatusOK, record)
+			return
+		}
+	}
+	if action == "outcome" {
+		if record.Status != "delivered" && record.Status != "confirmed" && record.Status != "failed" {
+			writeRequestJSON(w, http.StatusConflict, requestRecord{changeRequest: record.changeRequest, Status: record.Status, Reason: "station outcome is accepted only after delivery"})
+			return
+		}
+		if (decision.Status != "confirmed" && decision.Status != "failed") || decision.Revision != record.Revision || strings.TrimSpace(decision.Reporter) == "" {
+			writeRequestJSON(w, http.StatusUnprocessableEntity, requestRecord{changeRequest: record.changeRequest, Status: record.Status, Reason: "outcome must identify its reporter, matching revision, and confirmed or failed status"})
+			return
+		}
+		if decision.Status == "failed" && strings.TrimSpace(decision.Reason) == "" {
+			writeRequestJSON(w, http.StatusUnprocessableEntity, requestRecord{changeRequest: record.changeRequest, Status: record.Status, Reason: "failed outcome requires a reason"})
+			return
+		}
+		record.Status, record.Reason = decision.Status, decision.Reason
+		record.addAudit(decision.Status, decision.Reporter, decision.Reason, decision.Revision)
+		s.saveRequestRecord(record)
 		writeRequestJSON(w, http.StatusOK, record)
 		return
 	}
@@ -217,6 +251,7 @@ func (s *server) decideChangeRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		record.Status, record.Reason = "rejected", decision.Reason
+		record.addAudit("rejected", "approver", decision.Reason, "")
 		s.saveRequestRecord(record)
 		writeRequestJSON(w, http.StatusOK, record)
 		return
@@ -228,6 +263,7 @@ func (s *server) decideChangeRequest(w http.ResponseWriter, r *http.Request) {
 	revision, alreadyGenerated, err := s.commitScheduleChange(scheduleRequest{RequestID: record.RequestID, Station: record.Station, Schedule: record.Schedule, ApprovedBy: decision.ApprovedBy})
 	if err != nil {
 		record.Status, record.Reason = "rejected", err.Error()
+		record.addAudit("rejected", decision.ApprovedBy, err.Error(), "")
 		s.saveRequestRecord(record)
 		writeRequestJSON(w, http.StatusConflict, record)
 		return
@@ -241,8 +277,13 @@ func (s *server) decideChangeRequest(w http.ResponseWriter, r *http.Request) {
 		record.Status = "delivered"
 	}
 	s.mu.Unlock()
+	record.addAudit(record.Status, decision.ApprovedBy, "approval generated controlled Git revision", revision)
 	s.saveRequestRecord(record)
 	writeRequestJSON(w, http.StatusOK, record)
+}
+
+func (record *requestRecord) addAudit(status, actor, reason, revision string) {
+	record.Audit = append(record.Audit, auditEvent{At: time.Now().UTC(), Status: status, Actor: actor, Reason: reason, Revision: revision})
 }
 
 func (s *server) saveRequestRecord(record requestRecord) {
@@ -448,6 +489,7 @@ func (s *server) deliverLocked() {
 		for id, record := range s.state.Requests {
 			if record.Revision == s.state.Pending && record.Status == "awaiting-sync" {
 				record.Status = "delivered"
+				record.addAudit("delivered", "station-sync", "revision mirrored to the station Git cache", s.state.Pending)
 				s.state.Requests[id] = record
 			}
 		}

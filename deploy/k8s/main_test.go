@@ -226,6 +226,21 @@ func TestChangeRequestTransitionsToDeliveredWhenTheLinkReturns(t *testing.T) {
 	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"status":"delivered"`) {
 		t.Fatalf("delivered lifecycle: %d %s", read.Code, read.Body.String())
 	}
+	var delivered requestRecord
+	if err := json.NewDecoder(read.Body).Decode(&delivered); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := doJSON(t, service, http.MethodPost, "/v1/change-requests/demo-link-1/outcome", "approved", map[string]string{"status": "confirmed", "revision": delivered.Revision, "reporter": "station-flux-observer"})
+	if confirmed.Code != http.StatusOK || !strings.Contains(confirmed.Body.String(), `"status":"confirmed"`) {
+		t.Fatalf("confirmation: %d %s", confirmed.Code, confirmed.Body.String())
+	}
+	var final requestRecord
+	if err := json.NewDecoder(confirmed.Body).Decode(&final); err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Audit) != 4 || final.Audit[3].Status != "confirmed" {
+		t.Fatalf("audit trail = %#v", final.Audit)
+	}
 }
 
 func TestConcurrentApprovedRequestsCreateOneRevision(t *testing.T) {
