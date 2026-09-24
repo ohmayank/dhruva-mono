@@ -127,7 +127,7 @@ func TestChangeRequestLifecycleCreatesOnlyAnApprovedPatch(t *testing.T) {
 	request := changeRequest{
 		RequestID: "demo-approval-1", Station: maitri, Workload: "observation-aggregate",
 		Capability: "aggregation-schedule", Schedule: sixHourly,
-		RequestedBy: "researcher@example.invalid", Role: "researcher",
+		RequestedBy: "researcher@maitri.example", Role: "researcher",
 	}
 	created := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request)
 	if created.Code != http.StatusCreated {
@@ -179,7 +179,7 @@ func TestChangeRequestLifecycleCreatesOnlyAnApprovedPatch(t *testing.T) {
 
 func TestChangeRequestRejectsUnauthorizedCapabilityAndRecordsRejection(t *testing.T) {
 	service := &server{approvalToken: "approved", worktree: newDesiredStateRepository(t, twelveHourly), statePath: filepath.Join(t.TempDir(), "state.json")}
-	request := changeRequest{RequestID: "demo-reject-1", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: sixHourly, RequestedBy: "researcher", Role: "researcher"}
+	request := changeRequest{RequestID: "demo-reject-1", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: sixHourly, RequestedBy: "researcher@maitri.example", Role: "researcher"}
 	if got := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request).Code; got != http.StatusCreated {
 		t.Fatalf("create: %d", got)
 	}
@@ -207,7 +207,7 @@ func TestChangeRequestTransitionsToDeliveredWhenTheLinkReturns(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := &server{approvalToken: "approved", worktree: worktree, pushRemote: "station", statePath: filepath.Join(t.TempDir(), "state.json")}
-	request := changeRequest{RequestID: "demo-link-1", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: sixHourly, RequestedBy: "researcher", Role: "researcher"}
+	request := changeRequest{RequestID: "demo-link-1", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: sixHourly, RequestedBy: "researcher@maitri.example", Role: "researcher"}
 	if got := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request).Code; got != http.StatusCreated {
 		t.Fatalf("create: %d", got)
 	}

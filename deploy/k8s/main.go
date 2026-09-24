@@ -28,6 +28,13 @@ const (
 	maxRequestBodyBytes = 16 << 10
 )
 
+// demoPrincipalRoles is deliberately small. In the production design this
+// lookup is replaced by the authenticated identity provider's role claims;
+// the dashboard never gets to grant itself a role in either case.
+var demoPrincipalRoles = map[string]string{
+	"researcher@maitri.example": "researcher",
+}
+
 type scheduleRequest struct {
 	RequestID  string `json:"request_id"`
 	Station    string `json:"station"`
@@ -160,7 +167,8 @@ func validateChangeRequest(request changeRequest) error {
 	if request.Capability != "aggregation-schedule" || request.Schedule != sixHourly {
 		return errors.New("requested capability or parameter is not allowed")
 	}
-	if request.Role != "researcher" {
+	role, found := demoPrincipalRoles[request.RequestedBy]
+	if !found || request.Role != role || role != "researcher" {
 		return errors.New("role is not allowed to request this capability")
 	}
 	return nil
