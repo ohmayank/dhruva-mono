@@ -1,0 +1,12 @@
+# Replace this URL with the station-local Git daemon address reachable from Flux.
+# The gateway publishes only to this cache after the simulated link is restored.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: maitri-desired-state
+  namespace: flux-system
+spec:
+  interval: 1m
+  ref:
+    branch: master
+  url: http://maitri-git.example.invalid:9418/desired-state.git

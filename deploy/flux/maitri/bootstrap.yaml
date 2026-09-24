@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: simulator-maitri
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maitri-flux-reconciler
+  namespace: flux-system
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: maitri-workload-reconciler
+  namespace: simulator-maitri
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: ["observation-aggregate"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: maitri-workload-reconciler
+  namespace: simulator-maitri
+subjects:
+  - kind: ServiceAccount
+    name: maitri-flux-reconciler
+    namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: maitri-workload-reconciler
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: maitri-aggregation-schedule
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["cronjobs"]
+  matchConditions:
+    - name: maitri-aggregation-cronjob
+      expression: "request.namespace == 'simulator-maitri' && object.metadata.name == 'observation-aggregate'"
+  validations:
+    - expression: "oldObject == null || object.spec == oldObject.spec || (object.spec.schedule != oldObject.spec.schedule && object.spec.schedule in ['0 */12 * * *', '0 */6 * * *'] && object.spec.jobTemplate == oldObject.spec.jobTemplate && (!has(object.spec.suspend) && !has(oldObject.spec.suspend) || has(object.spec.suspend) && has(oldObject.spec.suspend) && object.spec.suspend == oldObject.spec.suspend) && object.spec.timeZone == oldObject.spec.timeZone && object.spec.concurrencyPolicy == oldObject.spec.concurrencyPolicy && object.spec.startingDeadlineSeconds == oldObject.spec.startingDeadlineSeconds && object.spec.successfulJobsHistoryLimit == oldObject.spec.successfulJobsHistoryLimit && object.spec.failedJobsHistoryLimit == oldObject.spec.failedJobsHistoryLimit)"
+      message: "only the aggregation schedule may change"
+    - expression: "object.spec.schedule == '0 */12 * * *' || object.spec.schedule == '0 */6 * * *'"
+      message: "only the approved 12-hour or 6-hour aggregation schedules are allowed"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: maitri-aggregation-schedule
+spec:
+  policyName: maitri-aggregation-schedule
+  validationActions: ["Deny"]

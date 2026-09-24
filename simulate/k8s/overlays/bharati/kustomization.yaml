@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: simulator-bharati
+resources:
+  - ../../base
+  - namespace.yaml
+configMapGenerator:
+  - name: simulator-profile
+    literals:
+      - STATION=bharati
+      - SOURCE=dcwis
+      - SEED=bharati-v1
+      - STORE_URL=http://simulator-store:8080
+generatorOptions:
+  disableNameSuffixHash: true

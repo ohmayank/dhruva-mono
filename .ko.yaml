@@ -1,0 +1,9 @@
+builds:
+  - id: simulator
+    dir: ./simulate
+    main: .
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s
+      - -w
