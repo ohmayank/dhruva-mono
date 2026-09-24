@@ -121,6 +121,113 @@ func TestApprovedScheduleChangeRejectsUnauthorizedAndUnsupportedRequests(t *test
 	}
 }
 
+func TestChangeRequestLifecycleCreatesOnlyAnApprovedPatch(t *testing.T) {
+	worktree := newDesiredStateRepository(t, twelveHourly)
+	service := &server{approvalToken: "approved", worktree: worktree, statePath: filepath.Join(t.TempDir(), "state.json")}
+	request := changeRequest{
+		RequestID: "demo-approval-1", Station: maitri, Workload: "observation-aggregate",
+		Capability: "aggregation-schedule", Schedule: sixHourly,
+		RequestedBy: "researcher@example.invalid", Role: "researcher",
+	}
+	created := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create request: %d %s", created.Code, created.Body.String())
+	}
+	var pending requestRecord
+	if err := json.NewDecoder(created.Body).Decode(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "pending-approval" {
+		t.Fatalf("request status = %q", pending.Status)
+	}
+	patch, err := os.ReadFile(filepath.Join(worktree, schedulePatchPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(patch), schedulePatch(twelveHourly); got != want {
+		t.Fatalf("pending request changed patch = %q, want %q", got, want)
+	}
+
+	approved := doJSON(t, service, http.MethodPost, "/v1/change-requests/demo-approval-1/approve", "approved", map[string]string{"approved_by": "lead@example.invalid"})
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", approved.Code, approved.Body.String())
+	}
+	var record requestRecord
+	if err := json.NewDecoder(approved.Body).Decode(&record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "awaiting-sync" || record.Revision == "" || record.ApprovedBy != "lead@example.invalid" {
+		t.Fatalf("approval record = %#v", record)
+	}
+	patch, err = os.ReadFile(filepath.Join(worktree, schedulePatchPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(patch), schedulePatch(sixHourly); got != want {
+		t.Fatalf("approved request patch = %q, want %q", got, want)
+	}
+
+	restarted := &server{worktree: worktree, statePath: service.statePath}
+	if err := restarted.loadState(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := doJSON(t, restarted, http.MethodGet, "/v1/change-requests/demo-approval-1", "", nil)
+	if loaded.Code != http.StatusOK || !strings.Contains(loaded.Body.String(), record.Revision) {
+		t.Fatalf("durable lifecycle read: %d %s", loaded.Code, loaded.Body.String())
+	}
+}
+
+func TestChangeRequestRejectsUnauthorizedCapabilityAndRecordsRejection(t *testing.T) {
+	service := &server{approvalToken: "approved", worktree: newDesiredStateRepository(t, twelveHourly), statePath: filepath.Join(t.TempDir(), "state.json")}
+	request := changeRequest{RequestID: "demo-reject-1", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: sixHourly, RequestedBy: "researcher", Role: "researcher"}
+	if got := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request).Code; got != http.StatusCreated {
+		t.Fatalf("create: %d", got)
+	}
+	if got := doJSON(t, service, http.MethodPost, "/v1/change-requests/demo-reject-1/reject", "wrong", map[string]string{"reason": "outside shift"}).Code; got != http.StatusUnauthorized {
+		t.Fatalf("unauthorized decision: %d", got)
+	}
+	rejected := doJSON(t, service, http.MethodPost, "/v1/change-requests/demo-reject-1/reject", "approved", map[string]string{"reason": "outside shift"})
+	if rejected.Code != http.StatusOK || !strings.Contains(rejected.Body.String(), "outside shift") {
+		t.Fatalf("rejection: %d %s", rejected.Code, rejected.Body.String())
+	}
+	request.RequestID, request.Role = "bad-role", "viewer"
+	if got := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request).Code; got != http.StatusUnprocessableEntity {
+		t.Fatalf("role validation: %d", got)
+	}
+}
+
+func TestChangeRequestTransitionsToDeliveredWhenTheLinkReturns(t *testing.T) {
+	worktree := newDesiredStateRepository(t, twelveHourly)
+	remote := newBareRemote(t)
+	repo, err := git.PlainOpen(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "station", URLs: []string{remote}}); err != nil {
+		t.Fatal(err)
+	}
+	service := &server{approvalToken: "approved", worktree: worktree, pushRemote: "station", statePath: filepath.Join(t.TempDir(), "state.json")}
+	request := changeRequest{RequestID: "demo-link-1", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: sixHourly, RequestedBy: "researcher", Role: "researcher"}
+	if got := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request).Code; got != http.StatusCreated {
+		t.Fatalf("create: %d", got)
+	}
+	if got := doJSON(t, service, http.MethodPost, "/v1/change-requests/demo-link-1/approve", "approved", map[string]string{"approved_by": "lead"}).Code; got != http.StatusOK {
+		t.Fatalf("approve: %d", got)
+	}
+
+	link := httptest.NewRequest(http.MethodPost, "/v1/link", bytes.NewBufferString(`{"up":true}`))
+	link.Header.Set(approvalHeader, "approved")
+	response := httptest.NewRecorder()
+	service.setLink(response, link)
+	if response.Code != http.StatusOK {
+		t.Fatalf("restore link: %d %s", response.Code, response.Body.String())
+	}
+	read := doJSON(t, service, http.MethodGet, "/v1/change-requests/demo-link-1", "", nil)
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"status":"delivered"`) {
+		t.Fatalf("delivered lifecycle: %d %s", read.Code, read.Body.String())
+	}
+}
+
 func TestConcurrentApprovedRequestsCreateOneRevision(t *testing.T) {
 	worktree := newDesiredStateRepository(t, twelveHourly)
 	server := &server{approvalToken: "approved", worktree: worktree, statePath: filepath.Join(t.TempDir(), "state.json")}
@@ -164,6 +271,41 @@ func doRequest(t *testing.T, server *server, token string, value scheduleRequest
 	req.Header.Set(approvalHeader, token)
 	response := httptest.NewRecorder()
 	server.createScheduleChange(response, req)
+	return response
+}
+
+func doChangeRequest(t *testing.T, server *server, method, path, token string, value changeRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	return doJSON(t, server, method, path, token, value)
+}
+
+func doJSON(t *testing.T, server *server, method, path, token string, value any) *httptest.ResponseRecorder {
+	t.Helper()
+	var body *bytes.Reader
+	if value == nil {
+		body = bytes.NewReader(nil)
+	} else {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req := httptest.NewRequest(method, path, body)
+	if token != "" {
+		req.Header.Set(approvalHeader, token)
+	}
+	response := httptest.NewRecorder()
+	switch {
+	case method == http.MethodPost && path == "/v1/change-requests":
+		server.createChangeRequest(response, req)
+	case method == http.MethodPost:
+		server.decideChangeRequest(response, req)
+	case method == http.MethodGet && path == "/v1/change-requests":
+		server.listChangeRequests(response, req)
+	default:
+		server.getChangeRequest(response, req)
+	}
 	return response
 }
 

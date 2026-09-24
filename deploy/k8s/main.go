@@ -42,12 +42,34 @@ type scheduleResponse struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+// changeRequest is the narrow public contract used by the demo dashboard.  The
+// workflow is intentionally capability based: a client asks for an allowed
+// change, rather than supplying Kubernetes YAML to be applied.
+type changeRequest struct {
+	RequestID   string `json:"request_id"`
+	Station     string `json:"station"`
+	Workload    string `json:"workload"`
+	Capability  string `json:"capability"`
+	Schedule    string `json:"schedule"`
+	RequestedBy string `json:"requested_by"`
+	Role        string `json:"role"`
+}
+
+type requestRecord struct {
+	changeRequest
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`
+	ApprovedBy string `json:"approved_by,omitempty"`
+	Revision   string `json:"revision,omitempty"`
+}
+
 type gatewayState struct {
-	LinkUp    bool   `json:"link_up"`
-	Pending   string `json:"pending,omitempty"`
-	Delivered string `json:"delivered,omitempty"`
-	Attempts  int    `json:"attempts"`
-	LastError string `json:"last_error,omitempty"`
+	LinkUp    bool                     `json:"link_up"`
+	Pending   string                   `json:"pending,omitempty"`
+	Delivered string                   `json:"delivered,omitempty"`
+	Attempts  int                      `json:"attempts"`
+	LastError string                   `json:"last_error,omitempty"`
+	Requests  map[string]requestRecord `json:"requests,omitempty"`
 }
 
 type server struct {
@@ -75,6 +97,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("POST /v1/approved-schedule-changes", s.createScheduleChange)
+	mux.HandleFunc("POST /v1/change-requests", s.createChangeRequest)
+	mux.HandleFunc("GET /v1/change-requests", s.listChangeRequests)
+	mux.HandleFunc("GET /v1/change-requests/", s.getChangeRequest)
+	mux.HandleFunc("POST /v1/change-requests/", s.decideChangeRequest)
 	mux.HandleFunc("POST /v1/link", s.setLink)
 	mux.HandleFunc("GET /v1/state", s.getState)
 
@@ -83,6 +109,163 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *server) createChangeRequest(w http.ResponseWriter, r *http.Request) {
+	var request changeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)).Decode(&request); err != nil {
+		writeRequestJSON(w, http.StatusBadRequest, requestRecord{Status: "rejected", Reason: "invalid request"})
+		return
+	}
+	if err := validateChangeRequest(request); err != nil {
+		writeRequestJSON(w, http.StatusUnprocessableEntity, requestRecord{changeRequest: request, Status: "rejected", Reason: err.Error()})
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Requests == nil {
+		s.state.Requests = make(map[string]requestRecord)
+	}
+	if existing, found := s.state.Requests[request.RequestID]; found {
+		writeRequestJSON(w, http.StatusOK, existing)
+		return
+	}
+	record := requestRecord{changeRequest: request, Status: "pending-approval"}
+	s.state.Requests[request.RequestID] = record
+	if err := s.saveState(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeRequestJSON(w, http.StatusCreated, record)
+}
+
+func validateChangeRequest(request changeRequest) error {
+	if strings.TrimSpace(request.RequestID) == "" || strings.TrimSpace(request.RequestedBy) == "" {
+		return errors.New("request_id and requested_by are required")
+	}
+	if request.Station != maitri || request.Workload != "observation-aggregate" {
+		return errors.New("requested workload is not exposed at this station")
+	}
+	if request.Capability != "aggregation-schedule" || request.Schedule != sixHourly {
+		return errors.New("requested capability or parameter is not allowed")
+	}
+	if request.Role != "researcher" {
+		return errors.New("role is not allowed to request this capability")
+	}
+	return nil
+}
+
+func (s *server) getChangeRequest(w http.ResponseWriter, r *http.Request) {
+	id, action := requestPath(r.URL.Path)
+	if id == "" || action != "" {
+		http.NotFound(w, r)
+		return
+	}
+	s.mu.Lock()
+	record, found := s.state.Requests[id]
+	s.mu.Unlock()
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	writeRequestJSON(w, http.StatusOK, record)
+}
+
+func (s *server) listChangeRequests(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	records := make([]requestRecord, 0, len(s.state.Requests))
+	for _, record := range s.state.Requests {
+		records = append(records, record)
+	}
+	s.mu.Unlock()
+	writeRequestJSON(w, http.StatusOK, records)
+}
+
+func (s *server) decideChangeRequest(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		writeRequestJSON(w, http.StatusUnauthorized, requestRecord{Status: "rejected", Reason: "missing or invalid approval"})
+		return
+	}
+	id, action := requestPath(r.URL.Path)
+	if id == "" || (action != "approve" && action != "reject") {
+		http.NotFound(w, r)
+		return
+	}
+	var decision struct {
+		ApprovedBy string `json:"approved_by"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&decision); err != nil {
+		http.Error(w, "invalid decision", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	record, found := s.state.Requests[id]
+	s.mu.Unlock()
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	if record.Status != "pending-approval" {
+		writeRequestJSON(w, http.StatusOK, record)
+		return
+	}
+	if action == "reject" {
+		if strings.TrimSpace(decision.Reason) == "" {
+			writeRequestJSON(w, http.StatusUnprocessableEntity, requestRecord{changeRequest: record.changeRequest, Status: "rejected", Reason: "rejection reason is required"})
+			return
+		}
+		record.Status, record.Reason = "rejected", decision.Reason
+		s.saveRequestRecord(record)
+		writeRequestJSON(w, http.StatusOK, record)
+		return
+	}
+	if strings.TrimSpace(decision.ApprovedBy) == "" {
+		writeRequestJSON(w, http.StatusUnprocessableEntity, requestRecord{changeRequest: record.changeRequest, Status: "rejected", Reason: "approved_by is required"})
+		return
+	}
+	revision, alreadyGenerated, err := s.commitScheduleChange(scheduleRequest{RequestID: record.RequestID, Station: record.Station, Schedule: record.Schedule, ApprovedBy: decision.ApprovedBy})
+	if err != nil {
+		record.Status, record.Reason = "rejected", err.Error()
+		s.saveRequestRecord(record)
+		writeRequestJSON(w, http.StatusConflict, record)
+		return
+	}
+	record.ApprovedBy, record.Revision, record.Status = decision.ApprovedBy, revision, "awaiting-sync"
+	if alreadyGenerated {
+		record.Status = "already-generated"
+	}
+	s.mu.Lock()
+	if s.state.Delivered == revision {
+		record.Status = "delivered"
+	}
+	s.mu.Unlock()
+	s.saveRequestRecord(record)
+	writeRequestJSON(w, http.StatusOK, record)
+}
+
+func (s *server) saveRequestRecord(record requestRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Requests == nil {
+		s.state.Requests = make(map[string]requestRecord)
+	}
+	s.state.Requests[record.RequestID] = record
+	if err := s.saveState(); err != nil {
+		log.Printf("save request record: %v", err)
+	}
+}
+
+func requestPath(path string) (id, action string) {
+	parts := strings.Split(strings.TrimPrefix(path, "/v1/change-requests/"), "/")
+	if len(parts) == 0 || parts[0] == "" || len(parts) > 2 {
+		return "", ""
+	}
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return parts[0], ""
 }
 
 func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -262,6 +445,12 @@ func (s *server) deliverLocked() {
 		s.state.LastError = err.Error()
 	} else {
 		s.state.Delivered = s.state.Pending
+		for id, record := range s.state.Requests {
+			if record.Revision == s.state.Pending && record.Status == "awaiting-sync" {
+				record.Status = "delivered"
+				s.state.Requests[id] = record
+			}
+		}
 		s.state.Pending = ""
 		s.state.LastError = ""
 	}
@@ -331,6 +520,12 @@ func schedulePatch(schedule string) string {
 }
 
 func writeJSON(w http.ResponseWriter, status int, value scheduleResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeRequestJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
