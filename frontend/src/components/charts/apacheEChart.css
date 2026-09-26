@@ -1,0 +1,32 @@
+.plot-suite { display: flex; flex-direction: column; gap: 14px; }
+.plot-card { overflow: hidden; scroll-margin-top: 20px; border: 1px solid #d5e4e5; border-radius: 13px; background: #fff; }
+.plot-metrics-header { display: grid; grid-template-columns: .75fr 1fr 1fr; align-items: center; gap: clamp(20px, 5vw, 80px); padding: 18px clamp(20px, 4vw, 48px); background: #10384a; color: #f4f8fb; }
+.plot-metrics-header time { font-size: clamp(16px, 1.7vw, 22px); font-variant-numeric: tabular-nums; }
+.plot-metrics-header > div { display: grid; gap: 10px; }
+.plot-metrics-header span { font-size: clamp(12px, 1.25vw, 16px); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.plot-metrics-header b { margin-right: 5px; font-weight: 650; }
+.temperature-label { color: #f07a70; }
+.pressure-label { color: #c5d2d7; }
+.humidity-label { color: #65ce91; }
+.wind-label { color: #67a5f0; }
+.plot-body { padding: 18px 24px 12px; }
+.plot-heading { text-align: center; }.plot-heading > span { display: inline-flex; margin-bottom: 6px; padding: 4px 8px; border: 1px solid #e2e2df; border-radius: 99px; color: #777774; font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.plot-heading h2 { margin: 0; color: #176577; font-size: 18px; font-weight: 700; }
+.plot-heading p { margin: 5px 0 0; color: #718994; font-size: 11px; }
+.plot-scroll { overflow-x: auto; }
+.observation-plot { width: 100%; min-width: 780px; height: 380px; margin-top: 2px; }
+.plot-empty { margin: 25px 0; color: #718994; font-size: 12px; }
+.individual-plots { padding: 25px; border: 1px solid #dfdfdd; border-radius: 12px; background: #fff; }
+.individual-plots-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 18px; }.individual-plots-heading > div > span { color: #888885; font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }.individual-plots-heading h2 { margin: 6px 0 0; color: #242424; font-size: 21px; letter-spacing: -.035em; }.individual-plots-heading p { max-width: 330px; margin: 0; color: #858582; font-size: 11px; line-height: 1.5; text-align: right; }
+.metric-plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.metric-plot-card { min-width: 0; overflow: hidden; scroll-margin-top: 20px; border: 1px solid #e1e1df; border-radius: 10px; background: #fafaf9; }.metric-plot-card > header { display: flex; align-items: start; justify-content: space-between; padding: 15px 16px 0; }.metric-plot-card > header > div { display: flex; flex-direction: column; gap: 6px; }.metric-plot-card > header span { color: #777774; font-size: 9px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }.metric-plot-card > header strong { color: #242424; font-size: 24px; font-weight: 620; letter-spacing: -.04em; }.metric-plot-card > header strong small { margin-left: 4px; color: #858582; font-size: 11px; font-weight: 500; letter-spacing: 0; }.metric-plot-card .metric-dot { width: 8px; height: 8px; margin-top: 3px; border-radius: 50%; }
+.metric-plot { width: 100%; height: 190px; }.metric-plot-card footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid #e7e7e5; color: #888885; font-size: 9px; }
+@media (max-width: 760px) { .plot-metrics-header { grid-template-columns: 1fr 1fr; gap: 16px 22px; }.plot-metrics-header time { grid-column: 1 / -1; }.plot-body { padding: 16px 14px 8px; }.observation-plot { height: 310px; } }
+@media (max-width: 760px) { .individual-plots { padding: 19px 14px; }.individual-plots-heading { align-items: start; flex-direction: column; gap: 7px; }.individual-plots-heading p { text-align: left; }.metric-plot-grid { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .plot-metrics-header { grid-template-columns: 1fr; }.plot-metrics-header time { grid-column: auto; }.plot-metrics-header span { white-space: normal; } }
+
+.plot-card { border-color: #dfdfdd; border-radius: 12px; }
+.plot-metrics-header { border-bottom: 1px solid #e4e4e2; background: #f8f8f7; color: #333; }.plot-metrics-header time { font-weight: 620; }.plot-metrics-header b { color: #555; }.temperature-label, .pressure-label, .humidity-label, .wind-label { color: #555; }
+.plot-heading h2 { color: #333; }.plot-heading p, .plot-empty { color: #858582; }
+.plot-heading > span { border-color: #ddd6ff; background: var(--accent-purple-soft); color: var(--accent-purple-dark); }
+.individual-plots-heading > div > span { color: var(--accent-pink); }

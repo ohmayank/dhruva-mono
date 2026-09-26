@@ -1,0 +1,65 @@
+.all-workloads { max-width: 1440px; margin: 0 auto; }
+.workloads-header { display: flex; align-items: end; justify-content: space-between; gap: 30px; padding: 38px clamp(24px, 4vw, 50px); border-radius: 18px; background: #10384a; color: #fff; }
+.workloads-header > div:first-child { max-width: 720px; }
+.workloads-header .eyebrow { color: #a2dcd7; }
+.workloads-header h1 { margin: 9px 0 8px; font-size: clamp(32px, 3.6vw, 48px); letter-spacing: -.045em; }
+.workloads-header p { margin: 0; color: #bbd1d8; font-size: 15px; line-height: 1.65; }
+.workload-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.workload-card { overflow: hidden; padding: 22px; border: 1px solid #dce9e9; border-radius: 14px; background: #fff; box-shadow: 0 7px 20px #17475808; }
+.workload-card.connected-workload { border-color: #9fd8c7; box-shadow: 0 7px 22px #18755a12; }
+.workload-card-head { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; }
+.workload-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; background: #e8f3f2; color: #1c6c70; font-size: 18px; }
+.workload-icon svg { width: 18px; height: 18px; }
+.connected-workload .workload-icon { background: #dff5ec; color: #157052; }
+.workload-station { color: #63808a; font-size: 11px; font-weight: 850; letter-spacing: .11em; text-transform: uppercase; }
+.workload-card h2 { margin: 3px 0 0; color: #163b49; font-size: 20px; letter-spacing: -.02em; }
+.workload-card > p { min-height: 46px; margin: 16px 0; color: #607b84; font-size: 14px; line-height: 1.6; }
+.capability-drawer { margin-top: 13px; }
+.capability-drawer summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 1px solid transparent; border-radius: 8px; background: #f4f8f7; color: #758c94; font-size: 12px; cursor: pointer; list-style: none; transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.capability-drawer summary:hover { border-color: #b7d8d3; background: #eaf3f1; box-shadow: 0 5px 13px #164c4512; transform: translateY(-1px); }
+.capability-drawer summary::-webkit-details-marker { display: none; }
+.current-setting { display: inline-flex; align-items: center; gap: 12px; }
+.current-setting strong { color: #214b59; font-size: 13px; }
+.current-setting i { color: #216b73; font-size: 16px; font-style: normal; font-weight: 800; line-height: 1; transition: transform .18s ease; }
+.capability-drawer[open] .current-setting i { transform: rotate(45deg); }
+.capability-list { display: grid; gap: 10px; margin-top: 13px; }
+.capability-list section { padding: 13px; border: 1px solid #e1ebeb; border-radius: 9px; background: #fbfdfc; }
+.capability-list h3 { margin: 0; color: #244b58; font-size: 13px; }
+.capability-list p { margin: 5px 0 10px; color: #718991; font-size: 12px; line-height: 1.5; }
+.option-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.option-list span { padding: 6px 9px; border: 1px solid #cfe0df; border-radius: 99px; background: #fff; color: #42636c; font-size: 11px; cursor: pointer; transition: background .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.option-list span:hover { border-color: #7fbdb3; background: #e8f5f1; color: #155e57; box-shadow: 0 4px 10px #174f4712; transform: translateY(-1px); }
+.connected-action { display: flex; align-items: center; justify-content: space-between; margin-top: 11px; padding: 12px 13px; border-radius: 8px; background: #176858; color: #fff; font-size: 12px; font-weight: 800; text-decoration: none; transition: background .18s ease, box-shadow .18s ease, transform .18s ease; }
+.connected-action:hover { background: #115548; box-shadow: 0 6px 14px #1155482b; transform: translateY(-1px); }
+.capability-drawer summary:active, .option-list span:active, .connected-action:active { transform: translateY(0); }
+.preview-note { margin: 11px 0 0; padding: 11px 12px; border-radius: 8px; background: #f3f6f6; color: #72878e; font-size: 11px; line-height: 1.5; }
+@media (max-width: 900px) { .workloads-header { align-items: start; flex-direction: column; }.workload-grid { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .workloads-header { padding: 29px 23px; }.workload-card { padding: 18px; }.workload-card-head { grid-template-columns: auto 1fr; }.workload-card > p { min-height: 0; } }
+
+/* Match the landing page and dashboard product language. */
+.all-workloads { color: #242424; }
+.workloads-header { padding: 42px clamp(28px, 4vw, 52px); border: 1px solid #dfdfdd; border-radius: 15px; background: #fff; color: #222; box-shadow: 0 14px 38px rgba(0,0,0,.035); }
+.workloads-header .eyebrow { color: #747471; }
+.workloads-header h1 { margin: 11px 0 9px; font-weight: 610; letter-spacing: -.055em; }
+.workloads-header p { max-width: 650px; color: #777774; font-size: 14px; }
+.workload-grid { gap: 14px; margin-top: 14px; }
+.workload-card, .workload-card.connected-workload { padding: 24px; border-color: #dfdfdd; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.025); }
+.workload-card.connected-workload { border-color: #c9c9c5; }
+.workload-icon { border: 1px solid #e1e1df; border-radius: 9px; background: #f2f2f0; color: #444; }
+.connected-workload .workload-icon { border-color: var(--accent-purple); background: var(--accent-purple); color: #fff; }
+.workload-station { color: #888885; font-size: 9px; letter-spacing: .1em; }
+.workload-card h2 { color: #242424; font-weight: 620; }
+.workload-card > p { color: #777774; font-size: 13px; }
+.capability-drawer summary { border-color: #e6e6e4; background: #f7f7f6; color: #858582; }
+.capability-drawer summary:hover { border-color: #cececa; background: #efefed; box-shadow: 0 4px 10px rgba(0,0,0,.04); }
+.current-setting strong { color: #333; }.current-setting i { color: #555; }
+.capability-list section { border-color: #e4e4e2; background: #fbfbfa; }
+.capability-list h3 { color: #333; }.capability-list p { color: #838380; }
+.option-list span { border-color: #dcdcd9; background: #fff; color: #555; }.option-list span:hover { border-color: #bcbcb8; background: #efefed; color: #222; box-shadow: 0 4px 10px rgba(0,0,0,.04); }
+.connected-action { background: var(--accent-purple); color: #fff; font-weight: 650; }.connected-action:hover { background: var(--accent-purple-dark); box-shadow: 0 6px 14px rgba(81,56,238,.2); }
+.preview-note { background: #f4f4f2; color: #7d7d7a; }
+
+.workloads-header .eyebrow, .workload-station { color: var(--accent-purple-dark); }
+.workload-icon { border-color: #ddd6ff; background: var(--accent-purple-soft); color: var(--accent-purple-dark); }
+.workload-card.connected-workload { border-color: #d5ccff; }
+.option-list span:hover { border-color: #c8bcff; background: var(--accent-purple-soft); color: var(--accent-purple-dark); }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,7 @@ func runStore() error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("POST /observations", s.ingest)
+	mux.HandleFunc("GET /observations", s.listObservations)
 	mux.HandleFunc("GET /latest", s.latest)
 	mux.HandleFunc("POST /aggregate", s.aggregate)
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -144,13 +146,45 @@ func (s *diskStore) latest(w http.ResponseWriter, r *http.Request) {
 	source := r.URL.Query().Get("source")
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for i := len(s.observations) - 1; i >= 0; i-- {
-		if source == "" || s.observations[i].Source == source {
-			writeJSON(w, s.observations[i])
-			return
+	var latest *observation
+	for i := range s.observations {
+		item := &s.observations[i]
+		if (source == "" || item.Source == source) && (latest == nil || item.ObservedAt.After(latest.ObservedAt)) {
+			latest = item
 		}
 	}
+	if latest != nil {
+		writeJSON(w, latest)
+		return
+	}
 	http.Error(w, "no observations", http.StatusNotFound)
+}
+
+// listObservations returns a bounded, chronological series from the station store.
+func (s *diskStore) listObservations(w http.ResponseWriter, r *http.Request) {
+	source := r.URL.Query().Get("source")
+	limit := 48
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 500 {
+			http.Error(w, "limit must be between 1 and 500", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	s.mu.RLock()
+	items := make([]observation, 0, len(s.observations))
+	for _, item := range s.observations {
+		if source == "" || item.Source == source {
+			items = append(items, item)
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(items, func(i, j int) bool { return items[i].ObservedAt.Before(items[j].ObservedAt) })
+	if len(items) > limit {
+		items = items[len(items)-limit:]
+	}
+	writeJSON(w, items)
 }
 
 func (s *diskStore) aggregate(w http.ResponseWriter, _ *http.Request) {
@@ -209,6 +243,40 @@ func runProducer() error {
 	seed := hash(station + ":" + source + ":" + env("SEED", "simulator-v1"))
 	values, sequence := initialState(endpoint, source, station)
 	client := &http.Client{Timeout: 10 * time.Second}
+	stored, err := storedHistory(client, endpoint, source)
+	if err != nil {
+		return err
+	}
+	{
+		end := time.Now().UTC().Truncate(interval)
+		firstSequence := int64(1)
+		known := make(map[int64]bool, len(stored))
+		for _, item := range stored {
+			known[item.ObservedAt.UnixNano()] = true
+		}
+		if len(stored) > 0 {
+			latest := stored[len(stored)-1]
+			end = latest.ObservedAt.Add(interval)
+			firstSequence = latest.Sequence - 23
+		}
+		for _, item := range bootstrapObservations(station, source, end, interval, seed, values, 24, firstSequence) {
+			if known[item.ObservedAt.UnixNano()] {
+				continue
+			}
+			body, _ := json.Marshal(item)
+			resp, err := client.Post(endpoint+"/observations", "application/json", bytes.NewReader(body))
+			if err != nil {
+				return fmt.Errorf("bootstrap observation %s: %w", item.ID, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode >= 300 {
+				return fmt.Errorf("bootstrap observation %s: %s", item.ID, resp.Status)
+			}
+		}
+		if len(stored) == 0 {
+			values, sequence = initialState(endpoint, source, station)
+		}
+	}
 	for {
 		observedAt := time.Now().UTC().Truncate(interval)
 		sequence++
@@ -232,6 +300,32 @@ func runProducer() error {
 		}
 		time.Sleep(interval)
 	}
+}
+
+func bootstrapObservations(station, source string, end time.Time, interval time.Duration, seed uint64, initial map[string]float64, samples int, firstSequence int64) []observation {
+	items := make([]observation, 0, samples)
+	values := initial
+	for i := 0; i < samples; i++ {
+		values = nextValues(values, station, source, seed+uint64(i+1))
+		items = append(items, makeObservation(station, source, end.Add(-time.Duration(samples-i)*interval), firstSequence+int64(i), values))
+	}
+	return items
+}
+
+func storedHistory(client *http.Client, endpoint, source string) ([]observation, error) {
+	resp, err := client.Get(endpoint + "/observations?source=" + source + "&limit=100")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("history request returned %s", resp.Status)
+	}
+	var items []observation
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func initialState(endpoint, source, station string) (map[string]float64, int64) {

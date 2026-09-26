@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,7 +33,8 @@ const (
 // lookup is replaced by the authenticated identity provider's role claims;
 // the dashboard never gets to grant itself a role in either case.
 var demoPrincipalRoles = map[string]string{
-	"researcher@maitri.example": "researcher",
+	"researcher@maitri.example":   "researcher",
+	"maitri.research@dhruva.demo": "researcher",
 }
 
 type scheduleRequest struct {
@@ -49,17 +51,17 @@ type scheduleResponse struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// changeRequest is the narrow public contract used by the demo dashboard.  The
-// workflow is intentionally capability based: a client asks for an allowed
-// change, rather than supplying Kubernetes YAML to be applied.
+// changeRequest is the narrow public contract used by the dashboard. A client
+// asks for an allowed schedule change, rather than supplying Kubernetes YAML.
 type changeRequest struct {
-	RequestID   string `json:"request_id"`
-	Station     string `json:"station"`
-	Workload    string `json:"workload"`
-	Capability  string `json:"capability"`
-	Schedule    string `json:"schedule"`
-	RequestedBy string `json:"requested_by"`
-	Role        string `json:"role"`
+	RequestID     string `json:"request_id"`
+	Station       string `json:"station"`
+	Workload      string `json:"workload"`
+	Capability    string `json:"capability"`
+	Schedule      string `json:"schedule"`
+	Justification string `json:"justification,omitempty"`
+	RequestedBy   string `json:"requested_by"`
+	Role          string `json:"role"`
 }
 
 type requestRecord struct {
@@ -80,12 +82,13 @@ type auditEvent struct {
 }
 
 type gatewayState struct {
-	LinkUp    bool                     `json:"link_up"`
-	Pending   string                   `json:"pending,omitempty"`
-	Delivered string                   `json:"delivered,omitempty"`
-	Attempts  int                      `json:"attempts"`
-	LastError string                   `json:"last_error,omitempty"`
-	Requests  map[string]requestRecord `json:"requests,omitempty"`
+	LinkUp        bool                     `json:"link_up"`
+	LinkChangedAt time.Time                `json:"link_changed_at,omitempty"`
+	Pending       string                   `json:"pending,omitempty"`
+	Delivered     string                   `json:"delivered,omitempty"`
+	Attempts      int                      `json:"attempts"`
+	LastError     string                   `json:"last_error,omitempty"`
+	Requests      map[string]requestRecord `json:"requests,omitempty"`
 }
 
 type server struct {
@@ -94,6 +97,7 @@ type server struct {
 	approvalToken string
 	worktree      string
 	pushRemote    string
+	demoControls  bool
 	mu            sync.Mutex
 }
 
@@ -103,7 +107,7 @@ func main() {
 		log.Fatal("APPROVAL_TOKEN is required")
 	}
 
-	s := &server{approvalToken: approvalToken, worktree: env("GIT_WORKTREE", "."), pushRemote: env("GIT_PUSH_REMOTE", "station"), statePath: env("GATEWAY_STATE", "../gateway-state.json")}
+	s := &server{approvalToken: approvalToken, worktree: env("GIT_WORKTREE", "."), pushRemote: env("GIT_PUSH_REMOTE", "station"), statePath: env("GATEWAY_STATE", "../gateway-state.json"), demoControls: os.Getenv("DEMO_DIRECT_CONTROLS") == "1"}
 	if err := s.loadState(); err != nil {
 		log.Fatal(err)
 	}
@@ -119,12 +123,92 @@ func main() {
 	mux.HandleFunc("POST /v1/change-requests/", s.decideChangeRequest)
 	mux.HandleFunc("POST /v1/link", s.setLink)
 	mux.HandleFunc("GET /v1/state", s.getState)
+	mux.HandleFunc("GET /v1/dashboard", s.getDashboard)
+	mux.HandleFunc("POST /v1/demo/summary-frequency", s.setDemoSummaryFrequency)
 
 	addr := ":" + env("PORT", "8080")
+	if s.demoControls {
+		addr = "127.0.0.1" + addr
+	}
 	log.Printf("desired-state patch service listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, browserCORS(mux)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// setDemoSummaryFrequency gives the local demo a direct control without
+// distributing the approval token to the browser. It is disabled by default
+// and only reachable through a loopback-bound server.
+func (s *server) setDemoSummaryFrequency(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if !s.demoControls || err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		http.NotFound(w, r)
+		return
+	}
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		http.Error(w, "application/json required", http.StatusUnsupportedMediaType)
+		return
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		allowed := false
+		for _, candidate := range strings.Split(env("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"), ",") {
+			allowed = allowed || origin == strings.TrimSpace(candidate)
+		}
+		if !allowed {
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return
+		}
+	}
+	var input struct {
+		Hours int `json:"hours"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&input); err != nil || (input.Hours != 6 && input.Hours != 12) {
+		http.Error(w, "hours must be 6 or 12", http.StatusUnprocessableEntity)
+		return
+	}
+	schedule := sixHourly
+	if input.Hours == 12 {
+		schedule = twelveHourly
+	}
+	id := fmt.Sprintf("console-%d", time.Now().UTC().UnixNano())
+	record := requestRecord{changeRequest: changeRequest{RequestID: id, Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: schedule, RequestedBy: "local-demo-console"}, Status: "awaiting-sync", ApprovedBy: "local-demo-console"}
+	record.addAudit("awaiting-sync", "local-demo-console", "summary frequency changed in local demo", "")
+	s.mu.Lock()
+	if s.state.Requests == nil {
+		s.state.Requests = make(map[string]requestRecord)
+	}
+	s.state.Requests[id] = record
+	err = s.saveState()
+	s.mu.Unlock()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	revision, _, err := s.commitScheduleChange(scheduleRequest{RequestID: id, Station: maitri, Schedule: schedule, ApprovedBy: "local-demo-console"})
+	s.mu.Lock()
+	record = s.state.Requests[id]
+	if err != nil {
+		record.Status, record.Reason = "failed", err.Error()
+		record.addAudit("failed", "local-demo-console", err.Error(), "")
+	} else {
+		record.Revision = revision
+		if s.state.Delivered == revision {
+			record.Status = "delivered"
+		}
+		record.addAudit(record.Status, "local-demo-console", "change sent through station delivery", revision)
+	}
+	s.state.Requests[id] = record
+	saveErr := s.saveState()
+	s.mu.Unlock()
+	if saveErr != nil {
+		http.Error(w, saveErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err != nil {
+		writeRequestJSON(w, http.StatusConflict, record)
+		return
+	}
+	writeRequestJSON(w, http.StatusOK, record)
 }
 
 func (s *server) createChangeRequest(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +248,7 @@ func validateChangeRequest(request changeRequest) error {
 	if request.Station != maitri || request.Workload != "observation-aggregate" {
 		return errors.New("requested workload is not exposed at this station")
 	}
-	if request.Capability != "aggregation-schedule" || request.Schedule != sixHourly {
+	if request.Capability != "aggregation-schedule" || !allowedSchedule(request.Schedule) {
 		return errors.New("requested capability or parameter is not allowed")
 	}
 	role, found := demoPrincipalRoles[request.RequestedBy]
@@ -357,8 +441,8 @@ func validate(request scheduleRequest) error {
 	if request.Station != maitri {
 		return fmt.Errorf("station must be %q", maitri)
 	}
-	if request.Schedule != sixHourly {
-		return fmt.Errorf("schedule must be the allow-listed value %q", sixHourly)
+	if !allowedSchedule(request.Schedule) {
+		return fmt.Errorf("schedule must be %q or %q", twelveHourly, sixHourly)
 	}
 	if strings.TrimSpace(request.ApprovedBy) == "" {
 		return errors.New("approved_by is required")
@@ -394,7 +478,7 @@ func (s *server) commitScheduleChange(request scheduleRequest) (revision string,
 	if err != nil {
 		return "", false, fmt.Errorf("read allow-listed patch: %w", err)
 	}
-	desired := schedulePatch(sixHourly)
+	desired := schedulePatch(request.Schedule)
 	if string(current) == desired {
 		head, err := repo.Head()
 		if err != nil {
@@ -402,8 +486,8 @@ func (s *server) commitScheduleChange(request scheduleRequest) (revision string,
 		}
 		return head.Hash().String(), true, nil
 	}
-	if string(current) != schedulePatch(twelveHourly) {
-		return "", false, errors.New("allow-listed patch is not at the expected 12-hour baseline")
+	if string(current) != schedulePatch(twelveHourly) && string(current) != schedulePatch(sixHourly) {
+		return "", false, errors.New("allow-listed patch has an unsupported schedule")
 	}
 	if err := os.WriteFile(patchFile, []byte(desired), 0o640); err != nil {
 		return "", false, fmt.Errorf("write allow-listed patch: %w", err)
@@ -411,8 +495,12 @@ func (s *server) commitScheduleChange(request scheduleRequest) (revision string,
 	if _, err := worktree.Add(schedulePatchPath); err != nil {
 		return "", false, fmt.Errorf("stage allow-listed patch: %w", err)
 	}
+	hours := 6
+	if request.Schedule == twelveHourly {
+		hours = 12
+	}
 	hash, err := worktree.Commit(
-		fmt.Sprintf("maitri: set aggregation schedule to every 6 hours\n\nRequest: %s\nApproved by: %s", request.RequestID, request.ApprovedBy),
+		fmt.Sprintf("maitri: set aggregation schedule to every %d hours\n\nRequest: %s\nApproved by: %s", hours, request.RequestID, request.ApprovedBy),
 		&git.CommitOptions{Author: &object.Signature{Name: "dhruva-patch-service", Email: "patch-service@dhruva.local", When: time.Now().UTC()}},
 	)
 	if err != nil {
@@ -542,6 +630,9 @@ func (s *server) setLink(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.state.LinkUp != *input.Up {
+		s.state.LinkChangedAt = time.Now().UTC()
+	}
 	s.state.LinkUp = *input.Up
 	if err := s.saveState(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -552,6 +643,57 @@ func (s *server) setLink(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.state)
+}
+
+// getDashboard exposes only the read-only state needed by the browser. Approval
+// and link-control endpoints still require the server-side approval token.
+func (s *server) getDashboard(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records := make([]requestRecord, 0, len(s.state.Requests))
+	for _, record := range s.state.Requests {
+		records = append(records, record)
+	}
+	currentSchedule := ""
+	if patch, err := os.ReadFile(filepath.Join(s.worktree, schedulePatchPath)); err == nil {
+		for _, schedule := range []string{twelveHourly, sixHourly} {
+			if string(patch) == schedulePatch(schedule) {
+				currentSchedule = schedule
+			}
+		}
+	}
+	writeRequestJSON(w, http.StatusOK, map[string]any{
+		"workload":              map[string]string{"station": maitri, "kind": "CronJob", "name": "observation-aggregate", "desired_schedule": currentSchedule},
+		"link_up":               s.state.LinkUp,
+		"link_changed_at":       s.state.LinkChangedAt,
+		"pending_revision":      s.state.Pending,
+		"delivered_revision":    s.state.Delivered,
+		"delivery_attempts":     s.state.Attempts,
+		"last_error":            s.state.LastError,
+		"requests":              records,
+		"demo_controls_enabled": s.demoControls,
+	})
+}
+
+func browserCORS(next http.Handler) http.Handler {
+	origins := strings.Split(env("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"), ",")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		for _, allowed := range origins {
+			if origin != "" && origin == strings.TrimSpace(allowed) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				w.Header().Set("Vary", "Origin")
+				break
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *server) getState(w http.ResponseWriter, r *http.Request) {
@@ -567,6 +709,10 @@ func (s *server) getState(w http.ResponseWriter, r *http.Request) {
 
 func schedulePatch(schedule string) string {
 	return "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: observation-aggregate\nspec:\n  schedule: \"" + schedule + "\"\n"
+}
+
+func allowedSchedule(schedule string) bool {
+	return schedule == twelveHourly || schedule == sixHourly
 }
 
 func writeJSON(w http.ResponseWriter, status int, value scheduleResponse) {

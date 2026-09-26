@@ -100,6 +100,48 @@ func newBareRemote(t *testing.T) string {
 	return path
 }
 
+func TestLocalDemoControlUsesStationDeliveryAndStaysLoopbackOnly(t *testing.T) {
+	worktree := newDesiredStateRepository(t, twelveHourly)
+	service := &server{worktree: worktree, statePath: filepath.Join(t.TempDir(), "state.json"), state: gatewayState{LinkUp: true}, demoControls: true}
+	request := httptest.NewRequest(http.MethodPost, "/v1/demo/summary-frequency", strings.NewReader(`{"hours":6}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "192.0.2.4:4000"
+	outside := httptest.NewRecorder()
+	service.setDemoSummaryFrequency(outside, request)
+	if outside.Code != http.StatusNotFound {
+		t.Fatalf("outside request status = %d", outside.Code)
+	}
+	request.RemoteAddr = "127.0.0.1:4000"
+	request.Header.Set("Origin", "https://outside.example")
+	outsideOrigin := httptest.NewRecorder()
+	service.setDemoSummaryFrequency(outsideOrigin, request)
+	if outsideOrigin.Code != http.StatusForbidden {
+		t.Fatalf("outside origin status = %d", outsideOrigin.Code)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/demo/summary-frequency", strings.NewReader(`{"hours":6}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "127.0.0.1:4000"
+	response := httptest.NewRecorder()
+	service.setDemoSummaryFrequency(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("local request status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var record requestRecord
+	if err := json.Unmarshal(response.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "delivered" || record.Schedule != sixHourly || record.Revision == "" {
+		t.Fatalf("unexpected local control record: %#v", record)
+	}
+	patch, err := os.ReadFile(filepath.Join(worktree, schedulePatchPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(patch) != schedulePatch(sixHourly) {
+		t.Fatalf("schedule patch not changed: %s", patch)
+	}
+}
+
 func TestApprovedScheduleChangeRejectsUnauthorizedAndUnsupportedRequests(t *testing.T) {
 	worktree := newDesiredStateRepository(t, twelveHourly)
 	server := &server{approvalToken: "approved", worktree: worktree, statePath: filepath.Join(t.TempDir(), "state.json")}
@@ -127,7 +169,7 @@ func TestChangeRequestLifecycleCreatesOnlyAnApprovedPatch(t *testing.T) {
 	request := changeRequest{
 		RequestID: "demo-approval-1", Station: maitri, Workload: "observation-aggregate",
 		Capability: "aggregation-schedule", Schedule: sixHourly,
-		RequestedBy: "researcher@maitri.example", Role: "researcher",
+		RequestedBy: "maitri.research@dhruva.demo", Role: "researcher",
 	}
 	created := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request)
 	if created.Code != http.StatusCreated {
@@ -454,5 +496,110 @@ func TestMaitriPolicyRequiresTheDedicatedFluxIdentity(t *testing.T) {
 	const identity = "system:serviceaccount:flux-system:maitri-flux-reconciler"
 	if !strings.Contains(string(policy), identity) {
 		t.Fatalf("station policy does not require dedicated Flux identity %q", identity)
+	}
+}
+
+func TestDashboardReadShowsLifecycleWithoutApprovalToken(t *testing.T) {
+	service := &server{approvalToken: "secret", state: gatewayState{
+		LinkUp: false, Pending: "abc123", Attempts: 2,
+		Requests: map[string]requestRecord{"one": {changeRequest: changeRequest{RequestID: "one"}, Status: "awaiting-sync"}},
+	}}
+	response := httptest.NewRecorder()
+	service.getDashboard(response, httptest.NewRequest(http.MethodGet, "/v1/dashboard", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"pending_revision":"abc123"`) || !strings.Contains(response.Body.String(), `"request_id":"one"`) {
+		t.Fatalf("dashboard response: %d %s", response.Code, response.Body.String())
+	}
+	protected := httptest.NewRecorder()
+	service.getState(protected, httptest.NewRequest(http.MethodGet, "/v1/state", nil))
+	if protected.Code != http.StatusUnauthorized {
+		t.Fatalf("protected state status = %d", protected.Code)
+	}
+}
+
+func TestApprovedChangeCanRestoreTwelveHourlySchedule(t *testing.T) {
+	worktree := newDesiredStateRepository(t, sixHourly)
+	service := &server{approvalToken: "approved", worktree: worktree, statePath: filepath.Join(t.TempDir(), "state.json")}
+	request := changeRequest{
+		RequestID: "restore-12h", Station: maitri, Workload: "observation-aggregate",
+		Capability: "aggregation-schedule", Schedule: twelveHourly,
+		RequestedBy: "researcher@maitri.example", Role: "researcher",
+	}
+	created := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	approved := doJSON(t, service, http.MethodPost, "/v1/change-requests/restore-12h/approve", "approved", map[string]string{"approved_by": "operations-lead@maitri.example"})
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", approved.Code, approved.Body.String())
+	}
+	patch, err := os.ReadFile(filepath.Join(worktree, schedulePatchPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(patch) != schedulePatch(twelveHourly) {
+		t.Fatalf("patch = %q", patch)
+	}
+	var record requestRecord
+	if err := json.Unmarshal(approved.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "awaiting-sync" || record.Revision == "" {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
+func TestTwelveHourlyChangeFollowsApprovalDeliveryAndConfirmation(t *testing.T) {
+	worktree := newDesiredStateRepository(t, sixHourly)
+	remote := newBareRemote(t)
+	repo, err := git.PlainOpen(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "station", URLs: []string{remote}}); err != nil {
+		t.Fatal(err)
+	}
+	service := &server{approvalToken: "approved", worktree: worktree, pushRemote: "station", statePath: filepath.Join(t.TempDir(), "state.json")}
+	request := changeRequest{RequestID: "restore-after-outage", Station: maitri, Workload: "observation-aggregate", Capability: "aggregation-schedule", Schedule: twelveHourly, RequestedBy: "researcher@maitri.example", Role: "researcher"}
+	created := doChangeRequest(t, service, http.MethodPost, "/v1/change-requests", "", request)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	approved := doJSON(t, service, http.MethodPost, "/v1/change-requests/restore-after-outage/approve", "approved", map[string]string{"approved_by": "operations-lead@maitri.example"})
+	var record requestRecord
+	if err := json.Unmarshal(approved.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if approved.Code != http.StatusOK || record.Status != "awaiting-sync" || record.Revision == "" {
+		t.Fatalf("approved: %d %+v", approved.Code, record)
+	}
+	if service.state.Pending != record.Revision {
+		t.Fatal("revision was not held while link was down")
+	}
+
+	link := httptest.NewRequest(http.MethodPost, "/v1/link", bytes.NewBufferString(`{"up":true}`))
+	link.Header.Set(approvalHeader, "approved")
+	restored := httptest.NewRecorder()
+	service.setLink(restored, link)
+	if restored.Code != http.StatusOK || service.state.Delivered != record.Revision {
+		t.Fatalf("delivery: %d %+v", restored.Code, service.state)
+	}
+	confirmed := doJSON(t, service, http.MethodPost, "/v1/change-requests/restore-after-outage/outcome", "approved", map[string]string{"status": "confirmed", "revision": record.Revision, "reporter": "station-flux-observer"})
+	if err := json.Unmarshal(confirmed.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Code != http.StatusOK || record.Status != "confirmed" || len(record.Audit) != 4 {
+		t.Fatalf("confirmation: %d %+v", confirmed.Code, record)
+	}
+
+	stationRepo, err := git.PlainOpen(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stationHead, err := stationRepo.Reference("refs/heads/master", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stationHead.Hash().String() != record.Revision {
+		t.Fatalf("station revision = %s, want %s", stationHead.Hash(), record.Revision)
 	}
 }

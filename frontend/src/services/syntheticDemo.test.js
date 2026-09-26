@@ -1,0 +1,115 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { advanceDemo, reconcileNow, requestSummary, resetSyntheticDemo, reviewRequest, setDemoLink, requestWorkloadChange } from './syntheticDemo.js';
+
+test('reconcile now enforces role and approval before changing state', (context) => {
+  context.mock.method(Date, 'now', () => 1800000000000);
+  resetSyntheticDemo();
+  const pending = requestSummary(6, 'researcher');
+  const before = advanceDemo();
+  assert.throws(() => reconcileNow(pending.request_id, 'researcher'), /Forbidden/);
+  assert.throws(() => reconcileNow(pending.request_id, 'approver'), /Only an approved/);
+  assert.deepEqual(advanceDemo(), before);
+  reviewRequest(pending.request_id, false, 'approver');
+  assert.throws(() => reconcileNow(pending.request_id, 'approver'), /Only an approved/);
+});
+
+test('urgent reconciliation waits through outage and confirms the exact approved revision', (context) => {
+  let now = 1800000000000;
+  context.mock.method(Date, 'now', () => now);
+  resetSyntheticDemo();
+  setDemoLink(false);
+  const request = requestSummary(6, 'researcher');
+  reviewRequest(request.request_id, true, 'approver');
+  const queued = reconcileNow(request.request_id, 'approver');
+  assert.equal(queued.requests[0].status, 'awaiting-sync');
+  const auditCount = queued.requests[0].audit.length;
+  assert.equal(reconcileNow(request.request_id, 'approver').requests[0].audit.length, auditCount);
+  now += 60000;
+  assert.equal(advanceDemo().requests[0].status, 'awaiting-sync');
+  assert.equal(advanceDemo().workload.applied_schedule, '0 */12 * * *');
+  const delivered = setDemoLink(true);
+  assert.equal(delivered.requests[0].status, 'delivered');
+  assert.equal(delivered.delivered_revision, queued.requests[0].revision);
+  now += 999;
+  assert.equal(advanceDemo().requests[0].status, 'delivered');
+  now += 1;
+  const confirmed = advanceDemo();
+  assert.equal(confirmed.requests[0].status, 'confirmed');
+  assert.equal(confirmed.applied_revision, queued.requests[0].revision);
+  assert.equal(confirmed.workload.applied_schedule, '0 */6 * * *');
+  assert.throws(() => reconcileNow(request.request_id, 'approver'), /Only an approved/);
+});
+
+test('urgent requests preserve approval order even when submission order differs', (context) => {
+  let now = 1800000000000;
+  context.mock.method(Date, 'now', () => now);
+  resetSyntheticDemo();
+  setDemoLink(false);
+  const firstSubmitted = requestSummary(12, 'researcher');
+  const secondSubmitted = requestSummary(6, 'researcher');
+  reviewRequest(secondSubmitted.request_id, true, 'approver');
+  now += 10;
+  reviewRequest(firstSubmitted.request_id, true, 'approver');
+  reconcileNow(firstSubmitted.request_id, 'approver');
+  now += 3000;
+  let state = setDemoLink(true);
+  assert.equal(state.requests[1].status, 'delivered');
+  assert.equal(state.requests[0].status, 'awaiting-sync');
+  now += 4000;
+  state = advanceDemo();
+  assert.equal(state.applied_revision, state.requests[1].revision);
+  state = advanceDemo();
+  assert.equal(state.requests[0].status, 'delivered');
+  now += 1000;
+  state = advanceDemo();
+  assert.equal(state.applied_revision, state.requests[0].revision);
+  assert.equal(state.workload.applied_schedule, state.workload.desired_schedule);
+});
+
+test('normal reconciliation retains its polling delay', (context) => {
+  let now = 1800000000000;
+  context.mock.method(Date, 'now', () => now);
+  resetSyntheticDemo();
+  const request = requestSummary(6, 'researcher');
+  reviewRequest(request.request_id, true, 'approver');
+  now += 2499;
+  assert.equal(advanceDemo().requests[0].status, 'awaiting-sync');
+  now += 1;
+  assert.equal(advanceDemo().requests[0].status, 'delivered');
+  now += 4000;
+  assert.equal(advanceDemo().requests[0].status, 'confirmed');
+});
+
+test('bounded workload settings require review and remain isolated across stations', (context) => {
+  let now = 1800000000000;
+  context.mock.method(Date, 'now', () => now);
+  resetSyntheticDemo();
+  assert.throws(() => requestWorkloadChange('bharati/archive-maintenance', 'forever', 'researcher'), /allowed/);
+  assert.throws(() => requestWorkloadChange('maitri/instrument-calibration', 'Daily', 'approver'), /researchers/);
+  assert.throws(() => requestWorkloadChange('maitri/arbitrary', 'Daily', 'researcher'), /allowed/);
+  setDemoLink(false, 'Maitri');
+  const calibration = requestWorkloadChange('maitri/instrument-calibration', 'Daily', 'researcher');
+  const archive = requestWorkloadChange('bharati/archive-maintenance', '30 days', 'researcher');
+  reviewRequest(calibration.request_id, true, 'approver');
+  reviewRequest(archive.request_id, true, 'approver');
+  let state = advanceDemo();
+  assert.equal(state.settings['maitri/instrument-calibration'].applied, undefined);
+  assert.equal(state.workload.desired_schedule, '0 */12 * * *');
+  now += 3000;
+  state = advanceDemo();
+  assert.equal(state.requests[0].status, 'awaiting-sync');
+  assert.equal(state.requests[1].status, 'delivered');
+  now += 4000;
+  state = advanceDemo();
+  assert.equal(state.settings['bharati/archive-maintenance'].applied, '30 days');
+  assert.equal(state.requests[0].status, 'awaiting-sync');
+  assert.equal(state.workload.applied_schedule, '0 */12 * * *');
+  setDemoLink(true, 'Maitri');
+  now += 4000;
+  state = advanceDemo();
+  assert.equal(state.settings['maitri/instrument-calibration'].applied, 'Daily');
+  const rejected = requestWorkloadChange('bharati/quality-checks', 'Hold for review', 'researcher');
+  reviewRequest(rejected.request_id, false, 'approver');
+  assert.equal(advanceDemo().settings['bharati/quality-checks'], undefined);
+});
